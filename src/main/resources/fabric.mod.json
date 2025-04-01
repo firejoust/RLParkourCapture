@@ -1,0 +1,40 @@
+{
+	"schemaVersion": 1,
+	"id": "parkourcapture",
+	"version": "${version}",
+	"name": "RL Parkour Capture",
+	"description": "Tool capturing valuable data for a parkour RL model",
+	"authors": [
+		"firejoust"
+	],
+	"contact": {
+		"homepage": "https://github.com/firejoust",
+		"sources": "https://github.com/firejoust"
+	},
+	"license": "CC0-1.0",
+	"icon": "assets/parkourcapture/icon.png",
+	"environment": "*",
+	"entrypoints": {
+		"main": [
+		],
+		"client": [
+			"com.firejoust.parkourcapture.RLParkourCaptureClient"
+		]
+	},
+	"mixins": [
+		"parkourcapture.mixins.json",
+		{
+			"config": "parkourcapture.client.mixins.json",
+			"environment": "client"
+		}
+	],
+	"depends": {
+		"fabricloader": ">=0.16.10",
+		"minecraft": "~1.21.4",
+		"java": ">=21",
+		"fabric-api": "*"
+	},
+	"suggests": {
+		"another-mod": "*"
+	}
+}
