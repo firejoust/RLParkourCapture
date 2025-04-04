@@ -6,76 +6,44 @@ const data = require("minecraft-data")(MINECRAFT_VERSION);
 
 // --- Configuration ---
 const K = 4; // Number of ticks to stack for state sequence
-const MAX_VELOCITY = 1.0; // Max expected velocity component (blocks/tick) for normalization. Adjust based on observed data.
-const MAX_REL_HEIGHT = 10.0; // Max expected relative height difference (+/-) for normalization. Adjust.
-// --- REMOVED: VISION_WIDTH and VISION_HEIGHT are now inferred from data ---
-// const VISION_WIDTH = 32;
-// const VISION_HEIGHT = 48;
-// --- END REMOVED ---
-const MAX_RAYCAST_DISTANCE_UNITS = 255; // 0-255 representing 0-25.5 blocks
-const MAX_RAYCAST_DISTANCE_BLOCKS = 25.5; // Corresponds to MAX_RAYCAST_DISTANCE_UNITS / 10
+const MAX_VELOCITY = 1.0;
+const MAX_REL_HEIGHT = 10.0;
+const MAX_RAYCAST_DISTANCE_UNITS = 255;
+const MAX_RAYCAST_DISTANCE_BLOCKS = 25.5;
+
+// --- Binary Format Constants ---
+const MAGIC_STRING = "PKDSEQ";
+const FORMAT_VERSION = 1;
+const HEADER_SIZE = 20; // Calculated size of the header
 
 const States = {
-  DEFAULT: 0,
-  LADDER: 1,
-  VINE: 2,
-  WATER: 3,
-  LAVA: 4,
-  SLIME: 5,
-  COBWEB: 6,
-  SOUL_SAND: 7,
-  ICE: 8,
-  BLUE_ICE: 9,
-  HONEY: 10,
+  DEFAULT: 0, LADDER: 1, VINE: 2, WATER: 3, LAVA: 4, SLIME: 5,
+  COBWEB: 6, SOUL_SAND: 7, ICE: 8, BLUE_ICE: 9, HONEY: 10,
 };
 
-// Define block type mappings
 const BlockTypeMap = {
-  ladder: States.LADDER,
-  vine: States.VINE,
-  twisting_vines: States.VINE,
-  twisting_vines_plant: States.VINE,
-  weeping_vines: States.VINE,
-  weeping_vines_plant: States.VINE,
-  water: States.WATER,
-  lava: States.LAVA,
-  slime_block: States.SLIME,
-  cobweb: States.COBWEB,
-  soul_sand: States.SOUL_SAND,
-  ice: States.ICE,
-  packed_ice: States.ICE,
-  blue_ice: States.BLUE_ICE,
+  ladder: States.LADDER, vine: States.VINE, twisting_vines: States.VINE,
+  twisting_vines_plant: States.VINE, weeping_vines: States.VINE,
+  weeping_vines_plant: States.VINE, water: States.WATER, lava: States.LAVA,
+  slime_block: States.SLIME, cobweb: States.COBWEB, soul_sand: States.SOUL_SAND,
+  ice: States.ICE, packed_ice: States.ICE, blue_ice: States.BLUE_ICE,
   honey_block: States.HONEY,
 };
 
-// --- Helper Functions ---
-
-/** Clamps a value between min and max */
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(value, max));
+// --- Helper Functions (Unchanged) ---
+function clamp(value, min, max) { return Math.max(min, Math.min(value, max)); }
+function normalizeAngle(angle) { /* ... (keep existing implementation) ... */
+    let normalized = angle % 360;
+    if (normalized > 180) normalized -= 360;
+    else if (normalized <= -180) normalized += 360;
+    return normalized;
 }
-
-/** Normalizes an angle to the range [-180, 180] */
-function normalizeAngle(angle) {
-  let normalized = angle % 360;
-  if (normalized > 180) {
-    normalized -= 360;
-  } else if (normalized <= -180) {
-    normalized += 360;
-  }
-  return normalized;
+function getBlockType(state) { /* ... (keep existing implementation) ... */
+    const blockName = data.blocksByStateId[state]?.name;
+    return BlockTypeMap[blockName] || States.DEFAULT;
 }
 
 // --- Main Processing Logic ---
-
-function getBlockType(state) {
-  // Get the block name from state
-  const blockName = data.blocksByStateId[state]?.name;
-
-  // Return the mapped state or default
-  return BlockTypeMap[blockName] || States.DEFAULT;
-}
-
 function processFile(inputFilePath, outputFilePath) {
   console.log(`Processing file: ${inputFilePath}`);
 
@@ -84,159 +52,179 @@ function processFile(inputFilePath, outputFilePath) {
     const fileContent = fs.readFileSync(inputFilePath, "utf8");
     rawData = JSON.parse(fileContent);
   } catch (err) {
-    console.error(`Error reading or parsing input file ${inputFilePath}:`, err);
+    console.error(`Error reading/parsing JSON ${inputFilePath}:`, err);
     return;
   }
 
   const { ty: targetYaw, tfy: targetFallY, d: ticks } = rawData;
 
   if (!ticks || ticks.length < K) {
-    console.warn(`Skipping file ${inputFilePath}: Not enough ticks (${ticks?.length || 0}) for sequence length ${K}.`);
+    console.warn(`Skipping ${inputFilePath}: Not enough ticks (${ticks?.length || 0}) for K=${K}.`);
     return;
   }
 
-  // --- MODIFIED: Infer vision dimensions from the first tick's data ---
+  // Infer dimensions
   const firstTick = ticks[0];
-  if (!firstTick || !firstTick.vd || !Array.isArray(firstTick.vd) || firstTick.vd.length === 0 || !Array.isArray(firstTick.vd[0])) {
-    console.error(`Skipping file ${inputFilePath}: Invalid or missing vision data structure in the first tick.`);
+  if (!firstTick?.vd?.[0]) {
+    console.error(`Skipping ${inputFilePath}: Invalid vision data structure.`);
     return;
   }
-  const inferredVisionHeight = firstTick.vd.length;
-  const inferredVisionWidth = firstTick.vd[0].length;
-  console.log(`Inferred vision dimensions: ${inferredVisionWidth}x${inferredVisionHeight}`);
-  // --- END MODIFIED ---
+  const visionHeight = firstTick.vd.length;
+  const visionWidth = firstTick.vd[0].length;
+  console.log(`Inferred vision dimensions: ${visionWidth}x${visionHeight}`);
 
-  const processedSequences = [];
+  const visionTickSize = visionWidth * visionHeight; // Bytes per vision grid per tick
 
-  // Iterate through ticks to create sequences
-  // Start from K-1 so we have enough history for the first sequence
+  const processedSequences = []; // Still process into JS objects first
+
   for (let t = K - 1; t < ticks.length; t++) {
     const sequence = {
-      // --- MODIFIED: Comments reflect inferred dimensions ---
-      vision_dist_seq: [], // Sequence of inferredHeight x inferredWidth byte arrays (0-255)
-      vision_block_id_seq: [], // Sequence of inferredHeight x inferredWidth int arrays (block type IDs)
-      // --- END MODIFIED ---
-      proprio_seq: [], // Sequence of 8-element float arrays (normalized) - pitch removed
-      action_t: null, // 7-element float array (0.0/1.0) for tick t
+      vision_dist_seq_flat: [], // Flat Uint8Array K * W * H
+      vision_block_id_seq_flat: [], // Flat Uint8Array K * W * H
+      proprio_seq: [], // Array of K arrays of 8 floats
+      action_byte: 0, // Single byte for actions
     };
 
-    // Build the sequence from t-k+1 to t
+    let sequenceValid = true;
+    const tempDistBuffers = [];
+    const tempBlockIdBuffers = [];
+
     for (let offset = 0; offset < K; offset++) {
       const tickIndex = t - K + 1 + offset;
       const tickData = ticks[tickIndex];
 
-      // --- MODIFIED: Use inferred dimensions in loops ---
-      // 1. Process Vision Distance Grid
-      const visionDistGridBytes = [];
-      // Check if vision data exists and has expected structure for this specific tick (optional but safer)
-      if (!tickData.vd || tickData.vd.length !== inferredVisionHeight || !tickData.vd[0] || tickData.vd[0].length !== inferredVisionWidth) {
-        console.warn(`Warning: Vision distance grid dimensions mismatch or missing at tick index ${tickIndex} in file ${inputFilePath}. Expected ${inferredVisionWidth}x${inferredVisionHeight}. Skipping sequence.`);
-        // Skip this entire sequence if dimensions mismatch mid-file
-        sequence.proprio_seq = null; // Mark sequence as invalid
-        break; // Break inner loop
+      // Validate dimensions for this tick
+      if (!tickData.vd || tickData.vd.length !== visionHeight || !tickData.vd[0] || tickData.vd[0].length !== visionWidth ||
+          !tickData.vb || tickData.vb.length !== visionHeight || !tickData.vb[0] || tickData.vb[0].length !== visionWidth) {
+        console.warn(`Warning: Dimension mismatch at tick ${tickIndex} in ${inputFilePath}. Skipping sequence.`);
+        sequenceValid = false;
+        break;
       }
-      for (let r = 0; r < inferredVisionHeight; r++) {
-        const row = [];
-        for (let c = 0; c < inferredVisionWidth; c++) {
-          const distBlocks = clamp(tickData.vd[r][c], 0, MAX_RAYCAST_DISTANCE_BLOCKS);
-          const distUnits = Math.round(distBlocks * 10); // Scale to 0-255 range (1 decimal place)
-          row.push(clamp(distUnits, 0, MAX_RAYCAST_DISTANCE_UNITS)); // Ensure it's within byte range
-        }
-        visionDistGridBytes.push(row);
-      }
-      sequence.vision_dist_seq.push(visionDistGridBytes);
 
-      // 2. Process Vision Block Grid
-      const visionBlockIdGridBytes = [];
-      // Check if vision data exists and has expected structure for this specific tick (optional but safer)
-      if (!tickData.vb || tickData.vb.length !== inferredVisionHeight || !tickData.vb[0] || tickData.vb[0].length !== inferredVisionWidth) {
-        console.warn(`Warning: Vision block grid dimensions mismatch or missing at tick index ${tickIndex} in file ${inputFilePath}. Expected ${inferredVisionWidth}x${inferredVisionHeight}. Skipping sequence.`);
-        sequence.proprio_seq = null; // Mark sequence as invalid
-        break; // Break inner loop
-      }
-      for (let r = 0; r < inferredVisionHeight; r++) {
-        const row = [];
-        for (let c = 0; c < inferredVisionWidth; c++) {
-          const type = getBlockType(tickData.vb[r][c]); // Use getBlockType for mapping
-          row.push(type);
+      // 1. Process Vision Distance Grid -> Flat Buffer for this tick
+      const tickDistBuffer = Buffer.allocUnsafe(visionTickSize); // Use Buffer directly
+      let bufferIdx = 0;
+      for (let r = 0; r < visionHeight; r++) {
+        for (let c = 0; c < visionWidth; c++) {
+          const distBlocks = clamp(tickData.vd[r][c], 0, MAX_RAYCAST_DISTANCE_BLOCKS);
+          const distUnits = Math.round(distBlocks * 10);
+          tickDistBuffer.writeUInt8(clamp(distUnits, 0, MAX_RAYCAST_DISTANCE_UNITS), bufferIdx++);
         }
-        visionBlockIdGridBytes.push(row);
       }
-      sequence.vision_block_id_seq.push(visionBlockIdGridBytes);
-      // --- END MODIFIED ---
+      tempDistBuffers.push(tickDistBuffer);
+
+      // 2. Process Vision Block Grid -> Flat Buffer for this tick
+      const tickBlockIdBuffer = Buffer.allocUnsafe(visionTickSize);
+      bufferIdx = 0;
+      for (let r = 0; r < visionHeight; r++) {
+        for (let c = 0; c < visionWidth; c++) {
+          const type = getBlockType(tickData.vb[r][c]);
+          tickBlockIdBuffer.writeUInt8(type, bufferIdx++);
+        }
+      }
+      tempBlockIdBuffers.push(tickBlockIdBuffer);
 
       // 3. Process Proprioceptive Data
-      const proprioVector = [];
-      // Velocity (normalized)
-      proprioVector.push(clamp(tickData.vx / MAX_VELOCITY, -1.0, 1.0));
-      proprioVector.push(clamp(tickData.vy / MAX_VELOCITY, -1.0, 1.0));
-      proprioVector.push(clamp(tickData.vz / MAX_VELOCITY, -1.0, 1.0));
-      // Orientation (normalized relative yaw, pitch removed)
-      const deltaYaw = normalizeAngle(tickData.y - targetYaw);
-      proprioVector.push(deltaYaw / 180.0); // Scale [-180, 180] to [-1, 1]
-      // Pitch removed
-      // State Booleans (as floats)
-      proprioVector.push(tickData.g ? 1.0 : 0.0);
-      proprioVector.push(tickData.ch ? 1.0 : 0.0);
-      proprioVector.push(tickData.cv ? 1.0 : 0.0);
-      // Relative Height (normalized)
-      const deltaY = tickData.py - targetFallY;
-      proprioVector.push(clamp(deltaY / MAX_REL_HEIGHT, -1.0, 1.0));
-
+      const proprioVector = [
+        clamp(tickData.vx / MAX_VELOCITY, -1.0, 1.0),
+        clamp(tickData.vy / MAX_VELOCITY, -1.0, 1.0),
+        clamp(tickData.vz / MAX_VELOCITY, -1.0, 1.0),
+        normalizeAngle(tickData.y - targetYaw) / 180.0,
+        tickData.g ? 1.0 : 0.0,
+        tickData.ch ? 1.0 : 0.0,
+        tickData.cv ? 1.0 : 0.0,
+        clamp((tickData.py - targetFallY) / MAX_REL_HEIGHT, -1.0, 1.0),
+      ];
       sequence.proprio_seq.push(proprioVector);
+
     } // End loop for ticks within a sequence
 
-    // If the inner loop was broken due to dimension mismatch, skip adding this sequence
-    if (sequence.proprio_seq === null) {
-      continue; // Skip to the next sequence iteration
-    }
+    if (!sequenceValid) continue; // Skip if dimension mismatch occurred
 
-    // 4. Get Actions for the *last* tick of the sequence (tick t)
+    // Concatenate vision buffers
+    sequence.vision_dist_seq_flat = Buffer.concat(tempDistBuffers);
+    sequence.vision_block_id_seq_flat = Buffer.concat(tempBlockIdBuffers);
+
+    // 4. Get Actions for the *last* tick (t) and create action byte
     const lastTickData = ticks[t];
-    sequence.action_t = [
-      lastTickData.f ? 1.0 : 0.0,
-      lastTickData.l ? 1.0 : 0.0,
-      lastTickData.r ? 1.0 : 0.0,
-      lastTickData.b ? 1.0 : 0.0,
-      lastTickData.j ? 1.0 : 0.0,
-      lastTickData.n ? 1.0 : 0.0, // Sneak
-      lastTickData.s ? 1.0 : 0.0, // Sprint
-    ];
+    let actionByte = 0;
+    if (lastTickData.f) actionByte |= (1 << 0);
+    if (lastTickData.l) actionByte |= (1 << 1);
+    if (lastTickData.r) actionByte |= (1 << 2);
+    if (lastTickData.b) actionByte |= (1 << 3);
+    if (lastTickData.j) actionByte |= (1 << 4);
+    if (lastTickData.n) actionByte |= (1 << 5);
+    if (lastTickData.s) actionByte |= (1 << 6);
+    sequence.action_byte = actionByte;
 
     processedSequences.push(sequence);
   } // End loop for sequences
 
-  // --- Save Processed Data ---
   if (processedSequences.length === 0) {
-    console.warn(`No valid sequences generated for file ${inputFilePath}. Output file will not be created.`);
+    console.warn(`No valid sequences generated for ${inputFilePath}. Output file not created.`);
     return;
   }
 
+  // --- Write Binary Data ---
+  let fd;
   try {
-    // Use null, 2 for pretty printing, remove for smaller file size
-    const outputJson = JSON.stringify(processedSequences, null, 2);
-    fs.writeFileSync(outputFilePath, outputJson, "utf8");
-    console.log(`Successfully processed and saved data to: ${outputFilePath}`);
+    fd = fs.openSync(outputFilePath, 'w'); // Open file for writing
+
+    // 1. Write Header
+    const headerBuffer = Buffer.alloc(HEADER_SIZE);
+    let offset = 0;
+    offset += headerBuffer.write(MAGIC_STRING, offset, 'ascii');
+    offset = headerBuffer.writeUInt8(FORMAT_VERSION, offset);
+    offset = headerBuffer.writeUInt16BE(visionWidth, offset);
+    offset = headerBuffer.writeUInt16BE(visionHeight, offset);
+    offset = headerBuffer.writeUInt8(K, offset);
+    offset = headerBuffer.writeUInt32BE(processedSequences.length, offset);
+    offset = headerBuffer.writeUInt32BE(0, offset); // Reserved
+    fs.writeSync(fd, headerBuffer, 0, HEADER_SIZE, null);
+
+    // 2. Write Sequence Data
+    for (const seq of processedSequences) {
+      // Vision Distance
+      fs.writeSync(fd, seq.vision_dist_seq_flat, 0, seq.vision_dist_seq_flat.length, null);
+      // Vision Block IDs
+      fs.writeSync(fd, seq.vision_block_id_seq_flat, 0, seq.vision_block_id_seq_flat.length, null);
+      // Proprioceptive Data
+      const proprioBufferSize = K * 8 * 4; // K ticks * 8 floats * 4 bytes/float
+      const proprioBuffer = Buffer.allocUnsafe(proprioBufferSize);
+      let pOffset = 0;
+      for (let k_tick = 0; k_tick < K; k_tick++) {
+        for (let i = 0; i < 8; i++) {
+          pOffset = proprioBuffer.writeFloatBE(seq.proprio_seq[k_tick][i], pOffset);
+        }
+      }
+      fs.writeSync(fd, proprioBuffer, 0, proprioBufferSize, null);
+      // Action Byte
+      const actionBuffer = Buffer.from([seq.action_byte]);
+      fs.writeSync(fd, actionBuffer, 0, 1, null);
+    }
+
+    console.log(`Successfully processed and saved BINARY data to: ${outputFilePath}`);
     console.log(`Generated ${processedSequences.length} sequences.`);
+
   } catch (err) {
-    console.error(`Error writing output file ${outputFilePath}:`, err);
+    console.error(`Error writing binary output file ${outputFilePath}:`, err);
+  } finally {
+    if (fd !== undefined) {
+      fs.closeSync(fd);
+    }
   }
 }
 
-// --- Script Execution ---
-
+// --- Script Execution (Unchanged) ---
 const args = process.argv.slice(2);
 if (args.length !== 2) {
-  console.error("Usage: node process_parkour_data.js <input_json_file> <output_json_file>");
+  console.error("Usage: node process_parkour_data.js <input_json_file> <output_binary_file>");
   process.exit(1);
 }
-
 const inputFilePath = path.resolve(args[0]);
-const outputFilePath = path.resolve(args[1]);
-
+const outputFilePath = path.resolve(args[1]); // Now expects binary output path
 if (!fs.existsSync(inputFilePath)) {
   console.error(`Input file not found: ${inputFilePath}`);
   process.exit(1);
 }
-
-processFile(inputFilePath, outputFilePath);
+processFile(inputFilePath, outputFilePath); // Call the modified function
