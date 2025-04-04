@@ -38,19 +38,20 @@ public class RLParkourCaptureClient implements ClientModInitializer {
     private static final String KEY_CATEGORY = "key.categories." + MOD_ID;
 
     private static KeyBinding keyToggleRecording;
-    private static KeyBinding keySetTargetYaw;
+    // Removed: private static KeyBinding keySetTargetYaw;
     private static KeyBinding keySetFallZoneY;
 
     private boolean isRecording = false;
     private long recordingStartTimeMillis = 0;
     private List<ParkourTickData> recordedData = new ArrayList<>();
-    private Float targetBearingYaw = null;
+    private Float targetBearingYaw = null; // Will be set automatically on recording start
     private Integer fallZoneY = null;
     private double lastPlayerVelocityY = 0.0;
 
     // Fall zone warning
     private static final int WARNING_INTERVAL_TICKS = 100;
-    private static final double WARNING_DISTANCE_THRESHOLD = 10.0;
+    // --- MODIFIED: Reduced warning threshold ---
+    private static final double WARNING_DISTANCE_THRESHOLD = 8.0; // Was 10.0
     private long lastWarningTick = 0;
 
     private static final Gson GSON = new GsonBuilder()
@@ -67,10 +68,10 @@ public class RLParkourCaptureClient implements ClientModInitializer {
 
         keyToggleRecording = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                 "key." + MOD_ID + ".toggle_recording", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_F8, KEY_CATEGORY));
-        keySetTargetYaw = KeyBindingHelper.registerKeyBinding(new KeyBinding(
-                "key." + MOD_ID + ".set_target_yaw", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_F9, KEY_CATEGORY));
+        // Removed: keySetTargetYaw = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+        //        "key." + MOD_ID + ".set_target_yaw", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_F9, KEY_CATEGORY));
         keySetFallZoneY = KeyBindingHelper.registerKeyBinding(new KeyBinding(
-                "key." + MOD_ID + ".set_fall_zone_y", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_F10, KEY_CATEGORY));
+                "key." + MOD_ID + ".set_fall_zone_y", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_F10, KEY_CATEGORY)); // Kept F10 for Fall Zone Y
 
         ClientTickEvents.END_CLIENT_TICK.register(this::onClientTick);
 
@@ -94,11 +95,11 @@ public class RLParkourCaptureClient implements ClientModInitializer {
 
         if (isRecording) {
             // --- MODIFIED Call to capture ---
-            // Pass fallZoneY for calculation, but not targetBearingYaw
+            // Pass fallZoneY for calculation, pitch is handled internally in ParkourTickData
             ParkourTickData tickData = ParkourTickData.capture(client, fallZoneY, lastPlayerVelocityY);
             if (tickData != null) {
                 recordedData.add(tickData);
-                lastPlayerVelocityY = tickData.velocityY();
+                lastPlayerVelocityY = tickData.velocityY(); // Still need Y velocity for fall zone check logic
             } else {
                  LOGGER.error("Failed to capture tick data!");
             }
@@ -106,13 +107,12 @@ public class RLParkourCaptureClient implements ClientModInitializer {
         }
     }
 
+    // --- MODIFIED: Removed target yaw key check ---
     private void handleKeybindings(MinecraftClient client) {
         while (keyToggleRecording.wasPressed()) {
             toggleRecording(client);
         }
-        while (keySetTargetYaw.wasPressed()) {
-            setTargetYaw(client);
-        }
+        // Removed: while (keySetTargetYaw.wasPressed()) { setTargetYaw(client); }
         while (keySetFallZoneY.wasPressed()) {
             setFallZoneY(client);
         }
@@ -126,19 +126,26 @@ public class RLParkourCaptureClient implements ClientModInitializer {
         }
     }
 
+    // --- MODIFIED: Automatically set target yaw, removed check ---
     private void startRecording(MinecraftClient client) {
-        if (targetBearingYaw == null) {
-            sendMessage(client, "Cannot start recording: Target Bearing Yaw not set.", Formatting.RED);
-            return;
-        }
+        // Removed check: if (targetBearingYaw == null) { ... }
         if (fallZoneY == null) {
             sendMessage(client, "Cannot start recording: Fall Zone Y not set.", Formatting.RED);
             return;
         }
+        if (client.player == null) {
+             sendMessage(client, "Cannot start recording: Player not available.", Formatting.RED);
+             return;
+        }
+
+        // --- Automatically set target yaw ---
+        targetBearingYaw = client.player.getYaw();
+        sendMessage(client, String.format("Target Bearing Yaw automatically set to: %.1f", targetBearingYaw), Formatting.AQUA);
+        LOGGER.info("Target Bearing Yaw automatically set: {}", String.format("%.1f", targetBearingYaw));
 
         isRecording = true;
         recordedData.clear();
-        lastPlayerVelocityY = client.player != null ? client.player.getVelocity().y : 0.0;
+        lastPlayerVelocityY = client.player.getVelocity().y;
         lastWarningTick = client.world.getTime();
         recordingStartTimeMillis = System.currentTimeMillis();
         sendMessage(client, "Started parkour data recording.", Formatting.GREEN);
@@ -160,20 +167,11 @@ public class RLParkourCaptureClient implements ClientModInitializer {
         }
         recordedData.clear();
         recordingStartTimeMillis = 0;
+        targetBearingYaw = null; // Reset auto-set yaw
     }
 
-    // --- MODIFIED: Prevent setting while recording ---
-    private void setTargetYaw(MinecraftClient client) {
-        if (isRecording) {
-            sendMessage(client, "Cannot set Target Yaw while recording is active.", Formatting.RED);
-            return;
-        }
-        if (client.player != null) {
-            targetBearingYaw = client.player.getYaw();
-            sendMessage(client, String.format("Target Bearing Yaw set to: %.1f", targetBearingYaw), Formatting.AQUA);
-            LOGGER.info("Target Bearing Yaw set: {}", String.format("%.1f", targetBearingYaw));
-        }
-    }
+    // --- REMOVED setTargetYaw method ---
+    // private void setTargetYaw(MinecraftClient client) { ... }
 
     // --- MODIFIED: Prevent setting while recording ---
     private void setFallZoneY(MinecraftClient client) {
@@ -214,6 +212,12 @@ public class RLParkourCaptureClient implements ClientModInitializer {
             sendMessage(client, "No data to save.", Formatting.GRAY);
             return;
         }
+        // Ensure targetBearingYaw was set (should be by startRecording)
+        if (targetBearingYaw == null) {
+             LOGGER.error("Attempted to save data but targetBearingYaw is null!");
+             sendMessage(client, "Error saving: Target Yaw was not set (Internal Error).", Formatting.RED);
+             return;
+        }
 
         String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
         String serverIp = (client.getCurrentServerEntry() != null ? client.getCurrentServerEntry().address : "Singleplayer")
@@ -221,17 +225,17 @@ public class RLParkourCaptureClient implements ClientModInitializer {
         String filename = String.format("%s_%s.json", serverIp, timestamp);
         Path filePath = SAVE_DIR.resolve(filename);
 
-        // --- Create Key Mappings ---
+        // --- Create Key Mappings (Updated) ---
         Map<String, String> keyMappings = new LinkedHashMap<>(); // Use LinkedHashMap to keep order
         // Top Level Keys
         keyMappings.put("ts", "startTimestampMillis");
         keyMappings.put("te", "stopTimestampMillis");
         keyMappings.put("ip", "serverIp");
-        keyMappings.put("ty", "targetBearingYaw");
+        keyMappings.put("ty", "targetBearingYaw"); // Still relevant for the run metadata
         keyMappings.put("tfy", "targetFallZoneY");
         keyMappings.put("map", "keyMappings"); // Mapping for the map itself
         keyMappings.put("d", "tickDataList");
-        // Tick Data Keys
+        // Tick Data Keys (Pitch removed)
         keyMappings.put("f", "inputForward");
         keyMappings.put("l", "inputLeft");
         keyMappings.put("r", "inputRight");
@@ -240,7 +244,7 @@ public class RLParkourCaptureClient implements ClientModInitializer {
         keyMappings.put("n", "inputSneak");
         keyMappings.put("s", "inputSprint");
         keyMappings.put("y", "playerYaw");
-        keyMappings.put("p", "playerPitch");
+        // keyMappings.put("p", "playerPitch"); // Removed pitch mapping
         keyMappings.put("vx", "velocityX");
         keyMappings.put("vy", "velocityY");
         keyMappings.put("vz", "velocityZ");
@@ -254,11 +258,12 @@ public class RLParkourCaptureClient implements ClientModInitializer {
 
 
         // --- Create Run Data Object ---
+        // ParkourRunData still includes targetBearingYaw as run metadata
         ParkourRunData runData = new ParkourRunData(
                 recordingStartTimeMillis,
                 System.currentTimeMillis(),
                 serverIp,
-                targetBearingYaw,
+                targetBearingYaw, // Use the automatically set yaw
                 fallZoneY,
                 keyMappings, // Add the mappings
                 recordedData
@@ -280,25 +285,26 @@ public class RLParkourCaptureClient implements ClientModInitializer {
         }
     }
 
-    // --- MODIFIED ParkourRunData Record ---
-    // Added keyMappings field
+    // --- ParkourRunData Record ---
+    // No changes needed here, targetBearingYaw is run metadata
     private record ParkourRunData(
         @SerializedName("ts") long startTimestampMillis,
         @SerializedName("te") long stopTimestampMillis,
         @SerializedName("ip") String serverIp,
         @SerializedName("ty") float targetBearingYaw,
         @SerializedName("tfy") int fallZoneY,
-        @SerializedName("map") Map<String, String> keyMappings, // Added mapping field
-        @SerializedName("d") List<ParkourTickData> ticks
+        @SerializedName("map") Map<String, String> keyMappings,
+        @SerializedName("d") List<ParkourTickData> ticks // Ticks list now contains data without pitch
     ) {}
 
 
     private void checkAndSendFallZoneWarning(MinecraftClient client) {
-        if (client.player == null || client.world == null || fallZoneY == null || !isRecording) return; // Also check isRecording
+        if (client.player == null || client.world == null || fallZoneY == null || !isRecording) return;
 
         long currentTick = client.world.getTime();
         if (currentTick >= lastWarningTick + WARNING_INTERVAL_TICKS) {
             double playerY = client.player.getY();
+            // Uses the updated WARNING_DISTANCE_THRESHOLD (8.0)
             if (Math.abs(playerY - fallZoneY) >= WARNING_DISTANCE_THRESHOLD) {
                 sendMessage(client, String.format("Warning: Vertical distance to fall zone (%.1f) >= %.1f",
                         Math.abs(playerY - fallZoneY), WARNING_DISTANCE_THRESHOLD), Formatting.YELLOW);
